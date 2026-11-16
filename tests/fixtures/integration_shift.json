@@ -1,0 +1,16 @@
+{
+  "name": "PRUEBA LOCAL 08-12 / 14-18",
+  "description": "Fixture de integración; no es una regla institucional",
+  "valid_from": "2026-11-01",
+  "valid_to": "2026-11-30",
+  "windows": {
+    "morning_entry": ["00:00:00", "11:59:59"],
+    "morning_exit": ["12:00:00", "13:00:00"],
+    "afternoon_entry": ["13:00:01", "16:59:59"],
+    "final_exit": ["17:00:00", "23:59:59"]
+  },
+  "segments": [
+    {"sequence": 1, "start_time": "08:00", "end_time": "12:00", "entry_kind": "morning_entry", "exit_kind": "morning_exit", "valid_from": "2026-11-01", "valid_to": "2026-11-30"},
+    {"sequence": 2, "start_time": "14:00", "end_time": "18:00", "entry_kind": "afternoon_entry", "exit_kind": "final_exit", "valid_from": "2026-11-01", "valid_to": "2026-11-30"}
+  ]
+}

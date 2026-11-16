@@ -1,0 +1,7 @@
+{
+  "valid_from": "2026-11-01", "valid_to": "2026-11-30",
+  "morning_entry_tolerance": 0, "morning_exit_tolerance": 0,
+  "afternoon_entry_tolerance": 0, "afternoon_exit_tolerance": 0,
+  "minimum_return_interval": 0, "duplicate_window": 0,
+  "exit_tolerance_semantics": "PENDING"
+}
