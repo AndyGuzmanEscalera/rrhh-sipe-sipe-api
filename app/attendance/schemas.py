@@ -44,11 +44,6 @@ class NormalizedRecord(BaseModel):
         return value
 
 
-class FileImport(BaseModel):
-    device_id: str = Field(min_length=1, max_length=100)
-    records: list[NormalizedRecord] = Field(min_length=1, max_length=10000)
-
-
 class LinkInput(BaseModel):
     funcionario_id: uuid.UUID
 

@@ -30,7 +30,9 @@ def complete_attempt(db, job, interval, today):
         row.last_error = None
 
 
-def fail_attempt(db, job_id, code):
-    for row in db.scalars(select(Coverage).where(Coverage.last_attempt_sync_id==job_id,
-            Coverage.status=='OPEN')):
+def fail_attempt(db, job_id, code, *, interval=None):
+    query = select(Coverage).where(Coverage.last_attempt_sync_id == job_id, Coverage.status == 'OPEN')
+    if interval is not None:
+        query = query.where(Coverage.date.between(interval.start, interval.end))
+    for row in db.scalars(query):
         row.status, row.last_error = 'FAILED', code

@@ -10,7 +10,7 @@ from app.db.session import session_factory, get_engine
 from app.biometric.models import Sync
 from app.biometric.service import BiometricService
 from app.biometric.api_client.errors import BiometricApiError
-from app.biometric.storage import ensure_device, persist_records
+from app.biometric.storage import ensure_device, insert_raw, validate_rows
 from app.biometric.coverage import coverage_map, begin_attempt, complete_attempt, fail_attempt
 from app.biometric.sync_planner import SyncPlanner
 
@@ -18,7 +18,7 @@ from app.biometric.sync_planner import SyncPlanner
 def enqueue(db, device_id, start, end, actor_id=None, force=False):
     SyncPlanner().plan(start,end,{},local_today(),force=force)
     ensure_device(db,device_id)
-    job = Sync(device_id=device_id, requested_from=start, requested_to=end,
+    job = Sync(device_id=device_id, origin='SOURCE_API', requested_from=start, requested_to=end,
         executed_by_user_id_external=actor_id, force=force)
     db.add(job)
     try:
@@ -35,13 +35,15 @@ def enqueue(db, device_id, start, end, actor_id=None, force=False):
 def run_once(factory=session_factory, bind=None, service_factory=BiometricService, today_fn=local_today):
     device_id = get_settings().biometric_device_id
     with factory() as db:
-        if db.scalar(select(Sync.id).where(Sync.device_id==device_id,Sync.status.in_(['queued','running'])).limit(1)) is None:
+        if db.scalar(select(Sync.id).where(Sync.device_id==device_id, Sync.origin=='SOURCE_API',
+                                          Sync.status.in_(['queued','running'])).limit(1)) is None:
             return False
     service = service_factory()
     with service.device_lock(bind if bind is not None else get_engine()):
         with factory() as db:
             job = db.scalar(select(Sync).where(Sync.device_id==service.config.device_id,
-                Sync.status.in_(['queued','running'])).order_by(Sync.created_at,Sync.id).with_for_update())
+                Sync.origin=='SOURCE_API', Sync.status.in_(['queued','running']))
+                .order_by(Sync.created_at,Sync.id).with_for_update())
             if job is None:
                 return False
             job_id = job.id
@@ -58,31 +60,40 @@ def run_once(factory=session_factory, bind=None, service_factory=BiometricServic
             job.planned_ranges=[{'start':r.start.isoformat(),'end':r.end.isoformat()} for r in intervals]
             db.commit()
         try:
+            had_row_errors = False
             for interval in intervals:
                 with factory() as db:
                     begin_attempt(db,db.get(Sync,job_id),interval)
                     db.commit()
                 rows=service.download(interval.start,interval.end)
+                valid, invalid = validate_rows(rows, device_id)
+                outside = sum(not interval.start <= record.timestamp.date() <= interval.end
+                              for record, _ in valid)
                 with factory() as db:
                     received_job=db.get(Sync,job_id)
                     received_job.records_received+=len(rows)
+                    received_job.error_records += invalid + outside
                     db.commit()
-                # Validate every row and range before accepting this range as covered.
-                from app.attendance.schemas import NormalizedRecord
-                for raw in rows:
-                    stamp=NormalizedRecord.model_validate({k:raw.get(k) for k in NormalizedRecord.model_fields}).timestamp
-                    if not interval.start <= stamp.date() <= interval.end:
-                        raise ValueError('Remote record outside requested range')
+                if outside:
+                    raise ValueError('Remote record outside requested range')
                 with factory() as db:
                     job=db.get(Sync,job_id)
-                    added=persist_records(db,job.device_id,rows)
+                    added = insert_raw(db, job.device_id, valid, job.origin, batch_id=job.id)
                     job.records_inserted+=added
-                    job.records_duplicated+=len(rows)-added
-                    complete_attempt(db,job,interval,today)
+                    job.records_duplicated += len(valid) - added
+                    if invalid:
+                        had_row_errors = True
+                        fail_attempt(db, job.id, 'biometric_invalid_rows', interval=interval)
+                    else:
+                        complete_attempt(db,job,interval,today)
                     db.commit()
             with factory() as db:
                 job=db.get(Sync,job_id)
-                job.status,job.finished_at='completed',datetime.now(timezone.utc)
+                job.status = 'failed' if had_row_errors else 'completed'
+                if had_row_errors:
+                    job.error_code = 'biometric_invalid_rows'
+                    job.error_message = 'Se guardaron las marcaciones válidas. Revise los errores y la cobertura del rango.'
+                job.finished_at = datetime.now(timezone.utc)
                 db.commit()
         except Exception as exc:
             code=exc.code if isinstance(exc,BiometricApiError) else 'biometric_sync_failed'
@@ -100,7 +111,8 @@ def schedule_due(db, now=None):
     if not settings.scheduler_enabled:
         return None
     now=now or datetime.now(timezone.utc)
-    last=db.scalar(select(Sync).where(Sync.device_id==settings.biometric_device_id).order_by(Sync.created_at.desc()).limit(1))
+    last=db.scalar(select(Sync).where(Sync.device_id==settings.biometric_device_id,
+        Sync.origin=='SOURCE_API').order_by(Sync.created_at.desc()).limit(1))
     if last and (last.status in {'queued','running'} or (now-last.created_at).total_seconds()<settings.scheduler_interval_seconds):
         return None
     today=local_today()
