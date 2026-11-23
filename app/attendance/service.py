@@ -1,12 +1,12 @@
 """Orchestrates the unchanged pure evaluator over local, date-effective inputs."""
 import uuid
-from datetime import date,timedelta
+from datetime import date,datetime,time,timedelta
 from app.core.clock import local_today
 from app.core.errors import problem
 from app.attendance.repository import AttendanceRepository,employee_header
 from app.attendance.periods import period_for
 from app.attendance.evaluation import evaluate_day,period_summary,calendar_days
-from app.attendance.evaluation_models import EvaluationPeriod,IndividualReport,ShiftHeader,GenerationResult,EmployeeEvaluationSummary,DayStatus
+from app.attendance.evaluation_models import EvaluationPeriod,IndividualReport,ShiftHeader,GenerationResult,EmployeeEvaluationSummary,DayStatus,EvaluationParameters,DaySchedule,ExpectedEvent,EventKind
 from app.shifts.repository import ShiftRepository
 
 
@@ -80,7 +80,7 @@ class AttendanceService:
             summary=period_summary(days) if days else None)
         return report
 
-    def report_range(self, employee_id, start, end):
+    def report_range(self, employee_id, start, end, evaluation=None):
         if not start or not end or not start <= end < date.max or (end - start).days > 366:
             raise problem('invalid_report_range', 'Seleccione un rango válido de hasta 367 días.', 422)
         header = employee_header(self.client.get_employee(employee_id))
@@ -91,6 +91,18 @@ class AttendanceService:
             marks.setdefault(record.timestamp.date(), []).append(record)
         schedules, configured_shifts = self.shifts.report_schedules(employee_id, dates)
         parameters = self.repository.report_parameters(dates)
+        if evaluation:
+            try:
+                clocks = [time.fromisoformat(evaluation[key]) for key in ('morning_start','morning_end','afternoon_start','afternoon_end')]
+                if any(value.second or value.microsecond for value in clocks) or any(a >= b for a,b in zip(clocks, clocks[1:])): raise ValueError
+            except (TypeError, ValueError):
+                raise problem('invalid_report_schedule', 'La jornada debe usar horas HH:mm en orden válido.', 422)
+            values = EvaluationParameters(morning_entry_tolerance=evaluation['morning_start_tolerance'] * 60, morning_exit_tolerance=evaluation['morning_end_tolerance'] * 60, afternoon_entry_tolerance=evaluation['afternoon_start_tolerance'] * 60, afternoon_exit_tolerance=evaluation['afternoon_end_tolerance'] * 60, minimum_return_interval=0, duplicate_window=0)
+            kinds = (EventKind.MORNING_ENTRY, EventKind.MORNING_EXIT, EventKind.AFTERNOON_ENTRY, EventKind.FINAL_EXIT)
+            for day in dates:
+                events = tuple(ExpectedEvent(kind=kind, expected_at=datetime.combine(day, clock), window_start=datetime.combine(day, clock)-timedelta(hours=4), window_end=datetime.combine(day, clock)+timedelta(hours=4)) for kind,clock in zip(kinds,clocks))
+                schedules[day] = (DaySchedule(day=day, shift_id='temporary-report', name='Jornada temporal de consulta', events=events), ())
+                parameters[day] = (values, None)
         devices, complete = self.repository.report_coverage(employee_id, start, end)
         today = self.today_fn()
         days = []
