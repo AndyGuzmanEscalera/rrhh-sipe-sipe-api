@@ -13,6 +13,8 @@ DEFAULT_PAGE_SIZE = 500
 MAX_PAGE_SIZE = 5000
 # Tope de páginas por descarga: evita bucles infinitos ante respuestas inconsistentes.
 MAX_PAGES = 2000
+# Marca que devuelve la API cuando el conjunto de la consulta ya no está vigente.
+SNAPSHOT_EXPIRED_MARKER = "snapshot_expired"
 
 
 class BiometricApiClient:
@@ -38,7 +40,14 @@ class BiometricApiClient:
             raise BiometricApiError("biometric_api_unreachable",
                                     "No fue posible contactar la API biométrica.") from None
         if response.status_code >= 300:
-            raise error_for_status(response.status_code, _detail(response))
+            detail = _detail(response)
+            if response.status_code == 400 and SNAPSHOT_EXPIRED_MARKER in detail:
+                # El conjunto de la consulta ya no está vigente: hay que repetir
+                # la descarga completa, no reintentar la página.
+                raise BiometricApiError("biometric_api_snapshot_expired",
+                                        "El snapshot de la consulta biométrica expiró; "
+                                        "repita la descarga completa.", detail) from None
+            raise error_for_status(response.status_code, detail)
         try:
             return response.json()
         except ValueError:
@@ -73,8 +82,12 @@ class BiometricApiClient:
         return users
 
     def get_attendance(self, *, date=None, from_date=None, to_date=None, ci=None,
-                       limit=DEFAULT_PAGE_SIZE, offset=0):
-        """Una página de marcaciones con los filtros indicados."""
+                       limit=DEFAULT_PAGE_SIZE, offset=0, snapshot_id=None):
+        """Una página de marcaciones con los filtros indicados.
+
+        `snapshot_id` reutiliza el conjunto ya consultado por la API: la misma
+        página se sirve sin volver a leer el reloj y el total no cambia.
+        """
         params = {"limit": limit, "offset": offset}
         if date:
             params["date"] = date
@@ -84,6 +97,8 @@ class BiometricApiClient:
             params["to"] = to_date
         if ci:
             params["ci"] = str(ci)
+        if snapshot_id:
+            params["snapshot_id"] = str(snapshot_id)
         payload = self._request("/attendance", params=params)
         if not isinstance(payload, dict):
             raise BiometricApiError("biometric_api_invalid_response",
@@ -92,6 +107,12 @@ class BiometricApiClient:
 
     def iter_attendance(self, *, page_size=DEFAULT_PAGE_SIZE, **filters):
         """Recorre todas las páginas de un filtro y devuelve cada marcación.
+
+        La primera página se pide sin `snapshot_id`: la API lee el dispositivo
+        una sola vez y devuelve el `snapshot_id` del conjunto filtrado. Las
+        páginas siguientes reutilizan ese mismo identificador y los filtros
+        originales, de modo que el total permanece estable y el reloj no se
+        vuelve a consultar.
 
         La paginación se guía por `total`, `count`, `limit` y `offset`. Si la
         respuesta es inconsistente se detiene el recorrido con un error controlado
@@ -102,9 +123,11 @@ class BiometricApiClient:
         pages = 0
         attempts = 0
         expected_total = None
+        snapshot_id = None
         while True:
             try:
-                payload = self.get_attendance(limit=size, offset=offset, **filters)
+                payload = self.get_attendance(limit=size, offset=offset,
+                                              snapshot_id=snapshot_id, **filters)
             except BiometricApiError as exc:
                 # El servidor puede admitir un límite menor que el configurado aquí.
                 if (exc.code == "biometric_api_invalid_request" and "limit" in exc.detail
@@ -121,6 +144,11 @@ class BiometricApiClient:
             if expected_total is not None and total != expected_total:
                 raise BiometricApiError('biometric_api_snapshot_changed','El total cambió durante la descarga; reintente.')
             expected_total = total
+            if snapshot_id is None:
+                # La API informa el conjunto consultado; se reutiliza en las páginas
+                # siguientes para que todas provengan del mismo dataset.
+                candidate = payload.get('snapshot_id')
+                snapshot_id = candidate if isinstance(candidate, str) and candidate else None
             for record in records:
                 yield record
             offset += count
