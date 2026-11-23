@@ -33,8 +33,14 @@ def test_range_reads_only_persisted_raw_and_reuses_evaluator(client, db, monkeyp
     assert len(report['days']) == 32
     assert report['days'][0]['date'] == '2026-07-01'
     assert len(report['days'][0]['original_records']) == 6
-    assert report['days'][0]['schedule']['name'] == 'Fixture 8'
-    assert report['days'][15]['late_seconds'] == 0
+    # El rango se evalúa contra la jornada temporal solicitada (08:00/12:00/14:00/18:00,
+    # tolerancias de 5 min). No se persiste como turno del funcionario.
+    assert report['days'][0]['schedule']['name'] == 'Jornada temporal de consulta'
+    assert report['days'][0]['schedule']['shift_id'] == 'temporary-report'
+    # Los turnos configurados del funcionario se siguen reportando aparte.
+    assert 'Fixture 8' in report['configured_shift_names']
+    # Marca de 09:10 contra un inicio de 08:00 con 5 min de tolerancia: 65 min tarde.
+    assert report['days'][15]['late_seconds'] == 3900
     assert report['days'][-1]['original_records'][0]['timestamp'] == '2026-08-01T23:59:59'
     assert report['days'][-1]['original_records'][0]['uid'] == 12
     assert report['summary']['total_records'] == 11

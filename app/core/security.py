@@ -12,11 +12,14 @@ bearer = HTTPBearer(auto_error=False)
 
 def make_client(request: Request):
     settings = get_settings()
-    token = settings.correspondencia_api_token.get_secret_value()
-    # Explicit configured technical bearer, otherwise delegated caller bearer.
+    # Prefer the caller's delegated Bearer so normal API traffic never depends on a
+    # permanent technical token. Scripts/CLI without a request still use the optional token.
     credentials = request.headers.get('authorization', '')
-    if not token and credentials.lower().startswith('bearer '):
-        token = credentials[7:]
+    if credentials.lower().startswith('bearer '):
+        # El Bearer delegado se reenvía tal cual, sin espacios sobrantes.
+        token = credentials[7:].strip()
+    else:
+        token = settings.correspondencia_api_token.get_secret_value()
     return CorrespondenciaClient(CorrespondenciaConfig(settings.correspondencia_api_url, token,
         settings.correspondencia_api_timeout))
 

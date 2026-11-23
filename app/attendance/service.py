@@ -7,6 +7,7 @@ from app.attendance.repository import AttendanceRepository,employee_header
 from app.attendance.periods import period_for
 from app.attendance.evaluation import evaluate_day,period_summary,calendar_days
 from app.attendance.evaluation_models import EvaluationPeriod,IndividualReport,ShiftHeader,GenerationResult,EmployeeEvaluationSummary,DayStatus,EvaluationParameters,DaySchedule,ExpectedEvent,EventKind
+from app.modules.rrhh.document_links import ensure_employee_link_by_document
 from app.shifts.repository import ShiftRepository
 
 
@@ -35,6 +36,7 @@ class AttendanceService:
 
     def report(self,employee_id,contract_id,year,month,start_date=None,end_date=None):
         employee=self.client.get_employee(employee_id)
+        ensure_employee_link_by_document(self.db,employee)
         header=employee_header(employee)
         policy,period,pending=self.context(contract_id,year,month)
         if start_date is not None or end_date is not None:
@@ -83,7 +85,9 @@ class AttendanceService:
     def report_range(self, employee_id, start, end, evaluation=None):
         if not start or not end or not start <= end < date.max or (end - start).days > 366:
             raise problem('invalid_report_range', 'Seleccione un rango válido de hasta 367 días.', 422)
-        header = employee_header(self.client.get_employee(employee_id))
+        employee = self.client.get_employee(employee_id)
+        ensure_employee_link_by_document(self.db, employee)
+        header = employee_header(employee)
         period = EvaluationPeriod(start_date=start, end_exclusive=end + timedelta(days=1))
         dates = [start + timedelta(days=i) for i in range((end - start).days + 1)]
         marks = {}

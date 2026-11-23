@@ -61,16 +61,58 @@ def _document_indexes(employees):
     return unique, ambiguous
 
 
+def ensure_employee_link_by_document(db: Session, employee) -> list[EmployeeLink]:
+    """Resuelve o crea vínculos activos para un funcionario usando su CI.
+
+    Pensado para el reporte de asistencia con el Bearer ya autenticado:
+    1. Reutiliza ``biometric_employee_links`` activos del funcionario.
+    2. Si no hay, compara ``employee.document_number`` con
+       ``Record.biometric_user_id`` y crea solo filas de vínculo.
+    No modifica ``biometric_records`` ni reimporta/resincroniza.
+    """
+    existing = list(db.scalars(select(EmployeeLink).where(
+        EmployeeLink.funcionario_id_external == employee.id,
+        EmployeeLink.is_active.is_(True))))
+    if existing:
+        return existing
+
+    document = (employee.document_number or '').strip()
+    if not document:
+        return []
+
+    pairs = list(db.execute(
+        select(Record.device_id, Record.biometric_user_id).where(
+            Record.biometric_user_id == document).distinct()))
+    created: list[EmployeeLink] = []
+    for device_id, bio_id in pairs:
+        row = db.get(EmployeeLink, (device_id, bio_id))
+        if row is not None:
+            continue
+        if db.get(Device, device_id) is None:
+            continue
+        link = EmployeeLink(
+            device_id=device_id,
+            biometric_user_id=bio_id,
+            funcionario_id_external=employee.id,
+            is_active=True,
+        )
+        db.add(link)
+        created.append(link)
+    if created:
+        db.commit()
+    return created
+
+
 def link_employees_by_document(
     db: Session,
     client,
     *,
     device_id: str | None = None,
 ) -> LinkByDocumentResult:
-    """Crea vínculos faltantes (device_id, biometric_user_id) → funcionario por CI.
+    """Herramienta administrativa opcional: vincula en lote por CI.
 
-    Idempotente: filas ya presentes en ``biometric_employee_links`` no se
-    recrean ni se sobrescriben. No toca ``biometric_records``.
+    El reporte normal no depende de este CLI. Idempotente: no recrea vínculos
+    existentes ni toca ``biometric_records``.
     """
     pairs_query = select(Record.device_id, Record.biometric_user_id).distinct()
     if device_id:

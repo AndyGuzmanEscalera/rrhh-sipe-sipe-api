@@ -1,5 +1,5 @@
 from datetime import date,datetime,time
-from sqlalchemy import select,or_
+from sqlalchemy import select,or_,tuple_
 from pydantic import ValidationError
 from app.attendance.models import Parameters,Policy
 from app.attendance.evaluation_models import EmployeeHeader,EvaluationParameters,RawMark
@@ -57,11 +57,19 @@ class AttendanceRepository:
         return rows[0] if len(rows)==1 else None
 
     def records(self,employee_id,period):
-        rows=self.db.scalars(select(Record).where(Record.funcionario_id_external==employee_id,
+        # Include unenriched RAW matched through biometric_employee_links without
+        # rewriting biometric_records.funcionario_id_external.
+        identity=[Record.funcionario_id_external==employee_id]
+        links=list(self.db.execute(select(EmployeeLink.device_id,EmployeeLink.biometric_user_id).where(
+            EmployeeLink.funcionario_id_external==employee_id,EmployeeLink.is_active.is_(True))))
+        if links:
+            identity.append(tuple_(Record.device_id,Record.biometric_user_id).in_(links))
+        rows=self.db.scalars(select(Record).where(or_(*identity),
             Record.timestamp>=datetime.combine(period.start_date,time.min),
             Record.timestamp<datetime.combine(period.end_exclusive,time.min)).order_by(Record.timestamp,Record.record_id))
         return tuple(RawMark(record_id=r.record_id,device_id=r.device_id,user_id=r.biometric_user_id,
-            funcionario_id=r.funcionario_id_external,timestamp=r.timestamp,status=r.status_raw,punch=r.punch_raw,
+            # DTO only: resolve via link without rewriting RAW funcionario_id_external.
+            funcionario_id=r.funcionario_id_external or employee_id,timestamp=r.timestamp,status=r.status_raw,punch=r.punch_raw,
             uid=r.uid_raw,source=r.source,source_file_name=r.source_file_name,import_batch_id=r.import_batch_id) for r in rows)
 
     def coverage(self,employee_id,day,today):

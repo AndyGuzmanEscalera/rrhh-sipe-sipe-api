@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Vincula biometric_user_id con funcionarios de Correspondencia por CI.
+"""Herramienta administrativa opcional: vincula biometric_user_id por CI en lote.
+
+El reporte GET /rrhh/attendance/employees/{id}/report ya resuelve vínculos con el
+Bearer delegado de la petición; este CLI no es requerido para el flujo normal.
 
 Uso (desde la raíz del API RRHH, con DATABASE_URL y CORRESPONDENCIA_API_*):
 
