@@ -59,6 +59,8 @@ class RawMark(FrozenModel):
     punch: int | None = None
     uid: int | None = None
     source: str
+    source_file_name: str | None = None
+    import_batch_id: uuid.UUID | None = None
 
     @field_validator("timestamp")
     @classmethod
@@ -279,6 +281,7 @@ class IndividualReport(FrozenModel):
     pending_policies: tuple[str, ...] = ("absence_policy", "overtime_policy", "exit_tolerance_semantics")
     summary: PeriodSummary | None = None
     days: tuple[DailyEvaluation, ...] = ()
+    configured_shift_names: tuple[str, ...] = ()
     calendar: tuple[CalendarDay, ...] = ()
 
 

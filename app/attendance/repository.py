@@ -24,6 +24,34 @@ class AttendanceRepository:
         except ValidationError:
             return None,row
 
+    def report_parameters(self, dates):
+        rows = tuple(self.db.scalars(select(Parameters).where(
+            Parameters.valid_from <= dates[-1],
+            or_(Parameters.valid_to.is_(None), Parameters.valid_to >= dates[0]))))
+        result = {}
+        for day in dates:
+            candidates = [row for row in rows if row.valid_from <= day and (row.valid_to is None or day <= row.valid_to)]
+            if len(candidates) != 1:
+                continue
+            row = candidates[0]
+            try:
+                parameters = EvaluationParameters(**{key: getattr(row, key) for key in EvaluationParameters.model_fields})
+            except ValidationError:
+                continue
+            result[day] = parameters, row.id
+        return result
+
+    def report_coverage(self, employee_id, start, end):
+        devices = set(self.db.scalars(select(EmployeeLink.device_id).where(
+            EmployeeLink.funcionario_id_external == employee_id, EmployeeLink.is_active.is_(True))))
+        if not devices:
+            return devices, {}
+        complete = {}
+        for device, day in self.db.execute(select(Coverage.device_id, Coverage.date).where(
+                Coverage.device_id.in_(devices), Coverage.date.between(start, end), Coverage.status == 'COMPLETE')):
+            complete.setdefault(day, set()).add(device)
+        return devices, complete
+
     def policy(self,contract_id,day):
         rows=list(self.db.scalars(select(Policy).where(Policy.contract_type_id_external==contract_id,*applicable(Policy,day))))
         return rows[0] if len(rows)==1 else None
@@ -34,7 +62,7 @@ class AttendanceRepository:
             Record.timestamp<datetime.combine(period.end_exclusive,time.min)).order_by(Record.timestamp,Record.record_id))
         return tuple(RawMark(record_id=r.record_id,device_id=r.device_id,user_id=r.biometric_user_id,
             funcionario_id=r.funcionario_id_external,timestamp=r.timestamp,status=r.status_raw,punch=r.punch_raw,
-            uid=r.uid_raw,source=r.source) for r in rows)
+            uid=r.uid_raw,source=r.source,source_file_name=r.source_file_name,import_batch_id=r.import_batch_id) for r in rows)
 
     def coverage(self,employee_id,day,today):
         devices=set(self.db.scalars(select(EmployeeLink.device_id).where(

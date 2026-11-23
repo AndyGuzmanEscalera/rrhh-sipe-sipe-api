@@ -27,8 +27,40 @@ class ShiftRepository:
         if shift is None or not active_on(shift,day):
             return None,('employee_shift_source',)
         # is_active is a catalog flag, not a retroactive historical cancellation.
-        segments=[s for s in self.db.scalars(select(Segment).where(Segment.shift_id==shift.id).order_by(Segment.sequence))
-            if active_on(s,day)]
+        segments = tuple(self.db.scalars(select(Segment).where(Segment.shift_id==shift.id).order_by(Segment.sequence)))
+        return self._schedule_for(day, shift, segments)
+
+    def report_schedules(self, employee_id, dates):
+        start, end = dates[0], dates[-1]
+        calendar = {row.date: row for row in self.db.scalars(select(CalendarDay).where(
+            CalendarDay.funcionario_id_external == employee_id, CalendarDay.date.between(start, end)))}
+        assignments = tuple(self.db.scalars(select(Assignment).where(
+            Assignment.funcionario_id_external == employee_id, Assignment.valid_from <= end,
+            or_(Assignment.valid_to.is_(None), Assignment.valid_to >= start))))
+        ids = {assignment.shift_id for assignment in assignments}
+        shifts = {row.id: row for row in self.db.scalars(select(Shift).where(Shift.id.in_(ids)))}
+        segments_by_shift = {}
+        for segment in self.db.scalars(select(Segment).where(Segment.shift_id.in_(ids)).order_by(Segment.sequence)):
+            segments_by_shift.setdefault(segment.shift_id, []).append(segment)
+        result = {}
+        for day in dates:
+            entry = calendar.get(day)
+            active = [row for row in assignments if active_on(row, day)]
+            shift = shifts.get(active[0].shift_id) if len(active) == 1 else None
+            if entry is None:
+                result[day] = None, ('confirmed_work_calendar',)
+            elif not entry.is_working:
+                result[day] = DaySchedule(day=day, shift_id='nonworking', name='Día no laborable confirmado'), ()
+            elif shift is None or not active_on(shift, day):
+                result[day] = None, ('employee_shift_source',)
+            else:
+                result[day] = self._schedule_for(day, shift, segments_by_shift.get(shift.id, ()))
+        return result, tuple(dict.fromkeys(shift.name for shift in shifts.values()
+                                          if shift.valid_from <= end and (shift.valid_to is None or shift.valid_to >= start)))
+
+    @staticmethod
+    def _schedule_for(day, shift, configured_segments):
+        segments = [segment for segment in configured_segments if active_on(segment, day)]
         if not segments or any(s.ends_next_day for s in segments):
             return None,('overnight_shift_policy',) if segments else ('employee_shift_source',)
         try:

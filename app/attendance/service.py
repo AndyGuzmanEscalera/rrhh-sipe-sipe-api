@@ -80,6 +80,38 @@ class AttendanceService:
             summary=period_summary(days) if days else None)
         return report
 
+    def report_range(self, employee_id, start, end):
+        if not start or not end or not start <= end < date.max or (end - start).days > 366:
+            raise problem('invalid_report_range', 'Seleccione un rango válido de hasta 367 días.', 422)
+        header = employee_header(self.client.get_employee(employee_id))
+        period = EvaluationPeriod(start_date=start, end_exclusive=end + timedelta(days=1))
+        dates = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+        marks = {}
+        for record in self.repository.records(employee_id, period):
+            marks.setdefault(record.timestamp.date(), []).append(record)
+        schedules, configured_shifts = self.shifts.report_schedules(employee_id, dates)
+        parameters = self.repository.report_parameters(dates)
+        devices, complete = self.repository.report_coverage(employee_id, start, end)
+        today = self.today_fn()
+        days = []
+        pending = {}
+        for day in dates:
+            schedule, issues = schedules[day]
+            values, revision = parameters.get(day, (None, None))
+            covered = bool(devices) and day < today and devices <= complete.get(day, set())
+            result = evaluate_day(employee_id, day, schedule, values, marks.get(day, ()), covered)
+            requirements = () if covered else ('biometric_coverage' if devices else 'biometric_employee_link',)
+            all_issues = tuple(dict.fromkeys((*result.pending_configuration, *issues, *requirements)))
+            pending.update(dict.fromkeys(all_issues))
+            days.append(result.model_copy(update={'pending_configuration': all_issues,
+                'parameters_snapshot': values, 'parameters_revision_id': revision}))
+        return IndividualReport(ready=not pending, employee=header, period=period, period_confirmed=True,
+            configured_shift_names=configured_shifts,
+            shifts=tuple(ShiftHeader(id=key, name=name) for key, name in dict.fromkeys(
+                (day.schedule.shift_id, day.schedule.name) for day in days if day.schedule and day.schedule.events)),
+            biometric_coverage='confirmed' if all(day.coverage is True for day in days) else 'unknown',
+            pending_configuration=tuple(pending), days=tuple(days), summary=period_summary(days))
+
     def generate(self,contract_id,year,month):
         policy,period,pending=self.context(contract_id,year,month)
         results=[]
