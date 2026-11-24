@@ -1,19 +1,18 @@
 """Orchestrates the unchanged pure evaluator over local, date-effective inputs."""
 import uuid
 from datetime import date,datetime,time,timedelta
-from app.core.clock import local_today
+from app.core.clock import local_now, local_today
 from app.core.errors import problem
 from app.attendance.repository import AttendanceRepository,employee_header
 from app.attendance.periods import period_for
 from app.attendance.evaluation import evaluate_day,period_summary,calendar_days
 from app.attendance.evaluation_models import EvaluationPeriod,IndividualReport,ShiftHeader,GenerationResult,EmployeeEvaluationSummary,DayStatus,EvaluationParameters,DaySchedule,ExpectedEvent,EventKind
-from app.modules.rrhh.document_links import ensure_employee_link_by_document
 from app.shifts.repository import ShiftRepository
 
 
 class AttendanceService:
-    def __init__(self,db,client,today_fn=local_today):
-        self.db,self.client,self.today_fn=db,client,today_fn
+    def __init__(self,db,client,today_fn=local_today,now_fn=local_now):
+        self.db,self.client,self.today_fn,self.now_fn=db,client,today_fn,now_fn
         self.repository=AttendanceRepository(db)
         self.shifts=ShiftRepository(db)
 
@@ -36,7 +35,6 @@ class AttendanceService:
 
     def report(self,employee_id,contract_id,year,month,start_date=None,end_date=None):
         employee=self.client.get_employee(employee_id)
-        ensure_employee_link_by_document(self.db,employee)
         header=employee_header(employee)
         policy,period,pending=self.context(contract_id,year,month)
         if start_date is not None or end_date is not None:
@@ -51,7 +49,7 @@ class AttendanceService:
         days=[]; revisions=[]
         # Missing contract population/semantics never triggers evaluation on guessed dates.
         if period and not pending:
-            marks=self.repository.records(employee_id,period)
+            marks=self.repository.records(employee_id,period,employee.document_number)
             by_day={}
             for mark in marks:
                 by_day.setdefault(mark.timestamp.date(),[]).append(mark)
@@ -60,8 +58,8 @@ class AttendanceService:
                 parameters,revision=self.repository.parameters_on(day)
                 if revision: revisions.append(revision)
                 schedule,issues=self.shifts.schedule(employee_id,day)
-                coverage,coverage_issues=self.repository.coverage(employee_id,day,self.today_fn())
-                result=evaluate_day(employee_id,day,schedule,parameters,by_day.get(day,()),coverage)
+                coverage,coverage_issues=self.repository.coverage(employee_id,day,self.today_fn(),employee.document_number)
+                result=evaluate_day(employee_id,day,schedule,parameters,by_day.get(day,()),coverage,self.now_fn())
                 # Keep all institutionally pending decisions, including exit policy.
                 all_issues=tuple(dict.fromkeys((*result.pending_configuration,*issues,*coverage_issues)))
                 result=result.model_copy(update={'pending_configuration':all_issues,
@@ -86,12 +84,11 @@ class AttendanceService:
         if not start or not end or not start <= end < date.max or (end - start).days > 366:
             raise problem('invalid_report_range', 'Seleccione un rango válido de hasta 367 días.', 422)
         employee = self.client.get_employee(employee_id)
-        ensure_employee_link_by_document(self.db, employee)
         header = employee_header(employee)
         period = EvaluationPeriod(start_date=start, end_exclusive=end + timedelta(days=1))
         dates = [start + timedelta(days=i) for i in range((end - start).days + 1)]
         marks = {}
-        for record in self.repository.records(employee_id, period):
+        for record in self.repository.records(employee_id, period, employee.document_number):
             marks.setdefault(record.timestamp.date(), []).append(record)
         schedules, configured_shifts = self.shifts.report_schedules(employee_id, dates)
         parameters = self.repository.report_parameters(dates)
@@ -107,15 +104,16 @@ class AttendanceService:
                 events = tuple(ExpectedEvent(kind=kind, expected_at=datetime.combine(day, clock), window_start=datetime.combine(day, clock)-timedelta(hours=4), window_end=datetime.combine(day, clock)+timedelta(hours=4)) for kind,clock in zip(kinds,clocks))
                 schedules[day] = (DaySchedule(day=day, shift_id='temporary-report', name='Jornada temporal de consulta', events=events), ())
                 parameters[day] = (values, None)
-        devices, complete = self.repository.report_coverage(employee_id, start, end)
+        devices, complete = self.repository.report_coverage(employee_id, start, end, employee.document_number)
         today = self.today_fn()
+        now = self.now_fn()
         days = []
         pending = {}
         for day in dates:
             schedule, issues = schedules[day]
             values, revision = parameters.get(day, (None, None))
             covered = bool(devices) and day < today and devices <= complete.get(day, set())
-            result = evaluate_day(employee_id, day, schedule, values, marks.get(day, ()), covered)
+            result = evaluate_day(employee_id, day, schedule, values, marks.get(day, ()), covered, now)
             requirements = () if covered else ('biometric_coverage' if devices else 'biometric_employee_link',)
             all_issues = tuple(dict.fromkeys((*result.pending_configuration, *issues, *requirements)))
             pending.update(dict.fromkeys(all_issues))

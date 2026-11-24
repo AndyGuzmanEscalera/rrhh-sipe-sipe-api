@@ -1,5 +1,5 @@
 from datetime import date,datetime,time
-from sqlalchemy import select,or_,tuple_
+from sqlalchemy import select,or_,tuple_,and_
 from pydantic import ValidationError
 from app.attendance.models import Parameters,Policy
 from app.attendance.evaluation_models import EmployeeHeader,EvaluationParameters,RawMark
@@ -41,9 +41,13 @@ class AttendanceRepository:
             result[day] = parameters, row.id
         return result
 
-    def report_coverage(self, employee_id, start, end):
+    def report_coverage(self, employee_id, start, end, document_number=None):
         devices = set(self.db.scalars(select(EmployeeLink.device_id).where(
             EmployeeLink.funcionario_id_external == employee_id, EmployeeLink.is_active.is_(True))))
+        document=(document_number or '').strip()
+        if document:
+            devices.update(self.db.scalars(select(Record.device_id).where(
+                Record.biometric_user_id == document, Record.date.between(start, end)).distinct()))
         if not devices:
             return devices, {}
         complete = {}
@@ -56,14 +60,23 @@ class AttendanceRepository:
         rows=list(self.db.scalars(select(Policy).where(Policy.contract_type_id_external==contract_id,*applicable(Policy,day))))
         return rows[0] if len(rows)==1 else None
 
-    def records(self,employee_id,period):
-        # Include unenriched RAW matched through biometric_employee_links without
-        # rewriting biometric_records.funcionario_id_external.
+    def records(self,employee_id,period,document_number=None):
+        """Read RAW by institutional CI, with explicit links as exceptions.
+
+        No report requires a prior link row: CI is the normal biometric identity.
+        An explicit link owned by a different employee wins over a CI collision.
+        """
         identity=[Record.funcionario_id_external==employee_id]
         links=list(self.db.execute(select(EmployeeLink.device_id,EmployeeLink.biometric_user_id).where(
             EmployeeLink.funcionario_id_external==employee_id,EmployeeLink.is_active.is_(True))))
         if links:
             identity.append(tuple_(Record.device_id,Record.biometric_user_id).in_(links))
+        document=(document_number or '').strip()
+        if document:
+            conflicts=select(EmployeeLink.device_id,EmployeeLink.biometric_user_id).where(
+                EmployeeLink.is_active.is_(True),EmployeeLink.funcionario_id_external!=employee_id)
+            identity.append(and_(Record.biometric_user_id==document,
+                ~tuple_(Record.device_id,Record.biometric_user_id).in_(conflicts)))
         rows=self.db.scalars(select(Record).where(or_(*identity),
             Record.timestamp>=datetime.combine(period.start_date,time.min),
             Record.timestamp<datetime.combine(period.end_exclusive,time.min)).order_by(Record.timestamp,Record.record_id))
@@ -72,9 +85,13 @@ class AttendanceRepository:
             funcionario_id=r.funcionario_id_external or employee_id,timestamp=r.timestamp,status=r.status_raw,punch=r.punch_raw,
             uid=r.uid_raw,source=r.source,source_file_name=r.source_file_name,import_batch_id=r.import_batch_id) for r in rows)
 
-    def coverage(self,employee_id,day,today):
+    def coverage(self,employee_id,day,today,document_number=None):
         devices=set(self.db.scalars(select(EmployeeLink.device_id).where(
             EmployeeLink.funcionario_id_external==employee_id,EmployeeLink.is_active.is_(True))))
+        document=(document_number or '').strip()
+        if document:
+            devices.update(self.db.scalars(select(Record.device_id).where(
+                Record.biometric_user_id==document,Record.date==day).distinct()))
         if not devices:
             return None,('biometric_employee_link',)
         complete=set(self.db.scalars(select(Coverage.device_id).where(Coverage.device_id.in_(devices),

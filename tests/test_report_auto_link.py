@@ -44,7 +44,7 @@ def test_existing_link_is_reused(client, db):
     assert 'biometric_employee_link' not in report['pending_configuration']
 
 
-def test_missing_link_matches_document_and_creates_link(client, db):
+def test_missing_link_reads_historical_raw_by_document_without_creating_link(client, db):
     _seed_marks(db)
     assert db.scalar(select(Record)).funcionario_id_external is None
     before = _raw_snapshot(db)
@@ -54,8 +54,7 @@ def test_missing_link_matches_document_and_creates_link(client, db):
     assert response.status_code == 200, response.text
     report = response.json()
 
-    link = db.get(EmployeeLink, ('test-clock', '007'))
-    assert link is not None and link.funcionario_id_external == EMPLOYEE and link.is_active
+    assert db.get(EmployeeLink, ('test-clock', '007')) is None
     assert report['summary']['total_records'] == 1
     assert report['days'][0]['original_records'][0]['user_id'] == '007'
     assert 'biometric_employee_link' not in report['pending_configuration']
@@ -63,12 +62,12 @@ def test_missing_link_matches_document_and_creates_link(client, db):
     assert db.scalar(select(Record)).funcionario_id_external is None
 
 
-def test_auto_link_is_idempotent_on_second_report(client, db):
+def test_document_lookup_is_idempotent_on_second_report(client, db):
     _seed_marks(db)
     first = client.get(ROUTE, params={'date_from': '2026-07-15', 'date_to': '2026-07-15'})
     second = client.get(ROUTE, params={'date_from': '2026-07-15', 'date_to': '2026-07-15'})
     assert first.status_code == second.status_code == 200
-    assert db.scalar(select(func.count()).select_from(EmployeeLink)) == 1
+    assert db.scalar(select(func.count()).select_from(EmployeeLink)) == 0
 
 
 def test_employee_without_document_or_marks_stays_unlinked(client, db):

@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from app.biometric.models import Device, EmployeeLink, Record
 from app.biometric.storage import ensure_device
 from app.modules.rrhh.document_links import link_employees_by_document
+from app.external.correspondencia.errors import CorrespondenciaError
 
 
 def _load_cli_module():
@@ -39,6 +40,11 @@ class FakeCorrespondencia:
 
     def list_employees(self, **filters):
         return self.employees, 1, 1
+
+
+class UnavailableCorrespondencia:
+    def list_employees(self, **filters):
+        raise CorrespondenciaError('correspondencia_unavailable')
 
 
 def _record(db, biometric_user_id, device_id='test-clock', stamp='2026-11-11T08:00:00'):
@@ -107,6 +113,56 @@ def test_link_by_document_is_idempotent(db):
     assert second.links_already_existing == 1
     assert second.matches_by_document == 1
     assert db.scalar(select(func.count()).select_from(EmployeeLink)) == 1
+
+
+
+def test_new_employee_recovers_historical_records_without_rewriting_raw(db):
+    employee = _employee('6539047')
+    _record(db, '6539047', stamp='2026-01-01T08:00:00')
+    _record(db, '6539047', stamp='2026-11-23T18:00:00')
+    db.commit()
+    raw_before = [(row.record_id, row.funcionario_id_external) for row in db.scalars(select(Record))]
+
+    result = link_employees_by_document(db, FakeCorrespondencia([employee]))
+    db.commit()
+
+    assert result.links_created == 1
+    assert db.get(EmployeeLink, ('test-clock', '6539047')).funcionario_id_external == employee.id
+    assert [(row.record_id, row.funcionario_id_external) for row in db.scalars(select(Record))] == raw_before
+
+
+def test_no_marks_for_new_employee_creates_no_link(db):
+    result = link_employees_by_document(db, FakeCorrespondencia([_employee('6539047')]))
+    assert result.links_created == 0
+    assert result.biometric_ids_found == 0
+
+
+
+
+def test_unavailable_correspondencia_leaves_raw_and_links_unchanged(db):
+    _record(db, '6539047')
+    db.commit()
+    before = [(row.record_id, row.funcionario_id_external) for row in db.scalars(select(Record))]
+    with pytest.raises(CorrespondenciaError):
+        link_employees_by_document(db, UnavailableCorrespondencia())
+    db.rollback()
+    assert [(row.record_id, row.funcionario_id_external) for row in db.scalars(select(Record))] == before
+    assert db.scalar(select(func.count()).select_from(EmployeeLink)) == 0
+
+
+def test_reconciliation_recovers_after_temporary_unavailability(db):
+    employee = _employee('6539047')
+    _record(db, '6539047')
+    db.commit()
+    with pytest.raises(CorrespondenciaError):
+        link_employees_by_document(db, UnavailableCorrespondencia())
+    db.rollback()
+    recovered = link_employees_by_document(db, FakeCorrespondencia([employee]))
+    db.commit()
+    assert recovered.links_created == 1
+    assert db.get(EmployeeLink, ('test-clock', '6539047')) is not None
+
+
 
 
 def test_ambiguous_document_is_not_linked(db):
