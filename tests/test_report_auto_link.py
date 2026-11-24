@@ -1,5 +1,6 @@
 """Reporte de asistencia: vínculo existente o resolución automática por CI."""
 from datetime import date
+import uuid
 
 from sqlalchemy import func, select
 
@@ -60,6 +61,22 @@ def test_missing_link_reads_historical_raw_by_document_without_creating_link(cli
     assert 'biometric_employee_link' not in report['pending_configuration']
     assert _raw_snapshot(db) == before
     assert db.scalar(select(Record)).funcionario_id_external is None
+
+
+def test_historical_uuid_is_rebound_in_memory_by_document(client, db):
+    old_employee = uuid.UUID('4508d14b-1243-4552-a4a0-42571b49420a')
+    ensure_device(db, 'test-clock')
+    persist_records(db, 'test-clock', [dict(user_id='007', timestamp='2026-07-15T08:10:00', status=15, punch=255, uid=42)])
+    row = db.scalar(select(Record))
+    row.funcionario_id_external = old_employee
+    db.add(EmployeeLink(device_id='test-clock', biometric_user_id='007', funcionario_id_external=old_employee, is_active=False))
+    db.add(Coverage(device_id='test-clock', date=date(2026, 7, 15), status='COMPLETE', records_count=1, attempt_count=1))
+    db.commit()
+    before = _raw_snapshot(db)
+    response = client.get(ROUTE, params={'date_from': '2026-07-15', 'date_to': '2026-07-15'})
+    assert response.status_code == 200, response.text
+    assert response.json()['days'][0]['original_records'][0]['funcionario_id'] == str(EMPLOYEE)
+    assert _raw_snapshot(db) == before
 
 
 def test_document_lookup_is_idempotent_on_second_report(client, db):

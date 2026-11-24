@@ -81,8 +81,9 @@ class AttendanceRepository:
             Record.timestamp>=datetime.combine(period.start_date,time.min),
             Record.timestamp<datetime.combine(period.end_exclusive,time.min)).order_by(Record.timestamp,Record.record_id))
         return tuple(RawMark(record_id=r.record_id,device_id=r.device_id,user_id=r.biometric_user_id,
-            # DTO only: resolve via link without rewriting RAW funcionario_id_external.
-            funcionario_id=r.funcionario_id_external or employee_id,timestamp=r.timestamp,status=r.status_raw,punch=r.punch_raw,
+            # The authorized query resolved ownership by CI or an explicit link.
+            # Rebind in memory even if RAW retains an obsolete external UUID.
+            funcionario_id=employee_id,timestamp=r.timestamp,status=r.status_raw,punch=r.punch_raw,
             uid=r.uid_raw,source=r.source,source_file_name=r.source_file_name,import_batch_id=r.import_batch_id) for r in rows)
 
     def coverage(self,employee_id,day,today,document_number=None):
