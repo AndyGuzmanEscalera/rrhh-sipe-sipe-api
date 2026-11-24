@@ -8,8 +8,8 @@ def local_timezone():
 
 
 def local_now():
-    """Instante actual en la hora local institucional (segundos, sin microsegundos)."""
-    return datetime.now(local_timezone()).replace(microsecond=0)
+    """Hora institucional local compatible con timestamps RAW sin zona horaria."""
+    return datetime.now(local_timezone()).replace(tzinfo=None, microsecond=0)
 
 
 def local_today():
