@@ -18,6 +18,8 @@ class DayStatus(str, Enum):
     OBSERVATION = "OBSERVATION"
     ANOMALY = "ANOMALY"
     NO_DATA = "NO_DATA"
+    # El día aún no terminó: hay marcaciones pero la jornada sigue abierta.
+    IN_PROGRESS = "IN_PROGRESS"
 
 
 class Severity(str, Enum):
@@ -36,6 +38,10 @@ class IncidentType(str, Enum):
     INTERMEDIATE_EXIT = "INTERMEDIATE_EXIT"
     MINIMUM_BREAK_VIOLATION = "MINIMUM_BREAK_VIOLATION"
     INCONSISTENT_SEQUENCE = "INCONSISTENT_SEQUENCE"
+    # Ausencia dentro del horario de trabajo esperado.
+    ABSENCE = "ABSENCE"
+    # Varias marcaciones registradas en la misma salida.
+    MULTIPLE_MARKS = "MULTIPLE_MARKS"
 
 
 class EventKind(str, Enum):
@@ -174,17 +180,22 @@ class DailyEvaluation(FrozenModel):
     morning_exit: datetime | None = None
     afternoon_entry: datetime | None = None
     final_exit: datetime | None = None
+    # Minutos enteros: los segundos exactos quedan disponibles para auditoría.
     late_seconds: int | None = None
-    late_minutes: float | None = None
+    late_minutes: int | None = None
     gross_early_exit_seconds: int | None = None
-    gross_early_exit_minutes: float | None = None
+    gross_early_exit_minutes: int | None = None
     early_exit_seconds: int | None = None
-    early_exit_minutes: float | None = None
+    early_exit_minutes: int | None = None
     observed_late_seconds: int = 0
     observed_gross_early_exit_seconds: int = 0
-    absence_minutes: float | None = None
-    non_evaluable_minutes: float | None = None
-    overtime_minutes: float | None = None
+    absence_seconds: int | None = None
+    absence_minutes: int | None = None
+    non_evaluable_minutes: int | None = None
+    overtime_seconds: int | None = None
+    overtime_minutes: int | None = None
+    # Marcaciones RAW conservadas que no son principales.
+    additional_records: int = 0
     reconstruction_complete: bool = False
     reason: str | None = None
     pending_configuration: tuple[str, ...] = ()
@@ -208,14 +219,19 @@ class PeriodSummary(FrozenModel):
     observation_days: int
     anomaly_days: int
     no_data_days: int
+    in_progress_days: int = 0
     total_records: int
     total_incidents: int
     total_late_seconds: int | None
-    total_late_minutes: float | None
+    total_late_minutes: int | None
     total_gross_early_exit_seconds: int | None
-    total_gross_early_exit_minutes: float | None
+    total_gross_early_exit_minutes: int | None
     total_early_exit_seconds: int | None
-    total_early_exit_minutes: float | None
+    total_early_exit_minutes: int | None
+    total_absence_seconds: int | None
+    total_absence_minutes: int | None
+    total_overtime_seconds: int | None
+    total_overtime_minutes: int | None
     observed_late_seconds: int
     observed_gross_early_exit_seconds: int
     totals_complete: bool
