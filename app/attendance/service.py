@@ -92,17 +92,41 @@ class AttendanceService:
             marks.setdefault(record.timestamp.date(), []).append(record)
         schedules, configured_shifts = self.shifts.report_schedules(employee_id, dates)
         parameters = self.repository.report_parameters(dates)
+        single_shift = bool(evaluation and evaluation.get('single_shift', False))
         if evaluation:
             try:
-                clocks = [time.fromisoformat(evaluation[key]) for key in ('morning_start','morning_end','afternoon_start','afternoon_end')]
+                clock_keys = ('morning_start', 'morning_end') if single_shift else (
+                    'morning_start', 'morning_end', 'afternoon_start', 'afternoon_end')
+                clocks = [time.fromisoformat(evaluation[key]) for key in clock_keys]
                 if any(value.second or value.microsecond for value in clocks) or any(a >= b for a,b in zip(clocks, clocks[1:])): raise ValueError
-            except (TypeError, ValueError):
-                raise problem('invalid_report_schedule', 'La jornada debe usar horas HH:mm en orden válido.', 422)
-            values = EvaluationParameters(morning_entry_tolerance=evaluation['morning_start_tolerance'] * 60, morning_exit_tolerance=evaluation['morning_end_tolerance'] * 60, afternoon_entry_tolerance=evaluation['afternoon_start_tolerance'] * 60, afternoon_exit_tolerance=evaluation['afternoon_end_tolerance'] * 60, minimum_return_interval=0, duplicate_window=0)
-            kinds = (EventKind.MORNING_ENTRY, EventKind.MORNING_EXIT, EventKind.AFTERNOON_ENTRY, EventKind.FINAL_EXIT)
+                tolerance_keys = ('morning_start_tolerance', 'morning_end_tolerance') if single_shift else (
+                    'morning_start_tolerance', 'morning_end_tolerance', 'afternoon_start_tolerance', 'afternoon_end_tolerance')
+                tolerances = [evaluation[key] for key in tolerance_keys]
+                if any(type(value) is not int or value < 0 for value in tolerances): raise ValueError
+            except (KeyError, TypeError, ValueError):
+                raise problem('invalid_report_schedule', 'La jornada debe usar horas HH:mm en orden válido y tolerancias no negativas.', 422)
+            if single_shift:
+                values = EvaluationParameters(morning_entry_tolerance=tolerances[0] * 60, morning_exit_tolerance=0,
+                    afternoon_entry_tolerance=0, afternoon_exit_tolerance=tolerances[1] * 60,
+                    minimum_return_interval=0, duplicate_window=0)
+                kinds = (EventKind.MORNING_ENTRY, EventKind.FINAL_EXIT)
+                schedule_name = 'Jornada continua temporal'
+            else:
+                values = EvaluationParameters(morning_entry_tolerance=tolerances[0] * 60, morning_exit_tolerance=tolerances[1] * 60,
+                    afternoon_entry_tolerance=tolerances[2] * 60, afternoon_exit_tolerance=tolerances[3] * 60,
+                    minimum_return_interval=0, duplicate_window=0)
+                kinds = (EventKind.MORNING_ENTRY, EventKind.MORNING_EXIT, EventKind.AFTERNOON_ENTRY, EventKind.FINAL_EXIT)
+                schedule_name = 'Jornada temporal de consulta'
             for day in dates:
-                events = tuple(ExpectedEvent(kind=kind, expected_at=datetime.combine(day, clock), window_start=datetime.combine(day, clock)-timedelta(hours=4), window_end=datetime.combine(day, clock)+timedelta(hours=4)) for kind,clock in zip(kinds,clocks))
-                schedules[day] = (DaySchedule(day=day, shift_id='temporary-report', name='Jornada temporal de consulta', events=events), ())
+                day_start = datetime.combine(day, time.min)
+                day_end = datetime.combine(day, time(23, 59, 59))
+                events = tuple(
+                    ExpectedEvent(kind=kind, expected_at=expected_at,
+                        window_start=max(day_start, expected_at-timedelta(hours=4)),
+                        window_end=min(day_end, expected_at+timedelta(hours=4)))
+                    for kind,clock in zip(kinds,clocks)
+                    for expected_at in (datetime.combine(day, clock),))
+                schedules[day] = (DaySchedule(day=day, shift_id='temporary-report', name=schedule_name, events=events), ())
                 parameters[day] = (values, None)
         devices, complete = self.repository.report_coverage(employee_id, start, end, employee.document_number)
         today = self.today_fn()
@@ -119,7 +143,7 @@ class AttendanceService:
             pending.update(dict.fromkeys(all_issues))
             days.append(result.model_copy(update={'pending_configuration': all_issues,
                 'parameters_snapshot': values, 'parameters_revision_id': revision}))
-        return IndividualReport(ready=not pending, employee=header, period=period, period_confirmed=True,
+        return IndividualReport(ready=not pending, single_shift=single_shift, employee=header, period=period, period_confirmed=True,
             configured_shift_names=configured_shifts,
             shifts=tuple(ShiftHeader(id=key, name=name) for key, name in dict.fromkeys(
                 (day.schedule.shift_id, day.schedule.name) for day in days if day.schedule and day.schedule.events)),

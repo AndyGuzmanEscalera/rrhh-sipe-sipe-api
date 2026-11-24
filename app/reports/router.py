@@ -17,6 +17,7 @@ def report(employee_id: uuid.UUID, contract_type_id: uuid.UUID | None = None,
            start_date: date | None = None, end_date: date | None = None,
            date_from: date | None = None, date_to: date | None = None,
            morning_start: str = '08:00', morning_end: str = '12:00', afternoon_start: str = '14:00', afternoon_end: str = '18:00',
+           single_shift: bool = False,
            morning_start_tolerance: int = Query(default=5, ge=0), morning_end_tolerance: int = Query(default=5, ge=0),
            afternoon_start_tolerance: int = Query(default=5, ge=0), afternoon_end_tolerance: int = Query(default=5, ge=0),
            db=Depends(get_db), actor=Depends(require_permission('rrhh.read')), client=Depends(make_client)):
@@ -25,6 +26,7 @@ def report(employee_id: uuid.UUID, contract_type_id: uuid.UUID | None = None,
         if any(value is not None for value in (contract_type_id, year, month, start_date, end_date)):
             raise problem('invalid_report_range', 'Use un único modo de consulta.', 422)
         return service.report_range(employee_id, date_from, date_to, {
+            'single_shift': single_shift,
             'morning_start': morning_start, 'morning_end': morning_end, 'afternoon_start': afternoon_start, 'afternoon_end': afternoon_end,
             'morning_start_tolerance': morning_start_tolerance, 'morning_end_tolerance': morning_end_tolerance,
             'afternoon_start_tolerance': afternoon_start_tolerance, 'afternoon_end_tolerance': afternoon_end_tolerance})

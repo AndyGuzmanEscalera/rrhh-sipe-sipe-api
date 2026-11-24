@@ -285,6 +285,7 @@ class ShiftDefinition(FrozenModel):
 class IndividualReport(FrozenModel):
     engine_version: str = ENGINE_VERSION
     ready: bool
+    single_shift: bool = False
     employee: EmployeeHeader
     period: EvaluationPeriod | None
     period_confirmed: bool = False

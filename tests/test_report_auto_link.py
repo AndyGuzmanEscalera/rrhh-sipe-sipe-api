@@ -79,6 +79,44 @@ def test_historical_uuid_is_rebound_in_memory_by_document(client, db):
     assert _raw_snapshot(db) == before
 
 
+def test_single_shift_report_uses_two_events_and_preserves_raw(client, db):
+    ensure_device(db, 'test-clock')
+    persist_records(db, 'test-clock', [
+        dict(user_id='007', timestamp='2026-07-15T07:10:00', status=15, punch=255, uid=1),
+        dict(user_id='007', timestamp='2026-07-15T13:00:00', status=15, punch=255, uid=2),
+        dict(user_id='007', timestamp='2026-07-15T21:30:00', status=15, punch=255, uid=3),
+    ])
+    db.add(Coverage(device_id='test-clock', date=date(2026, 7, 15), status='COMPLETE',
+                    records_count=3, attempt_count=1))
+    db.commit()
+    before = _raw_snapshot(db)
+    response = client.get(ROUTE, params={
+        'date_from': '2026-07-15', 'date_to': '2026-07-15', 'single_shift': 'true',
+        'morning_start': '07:00', 'morning_end': '21:00',
+        'morning_start_tolerance': 5, 'morning_end_tolerance': 5,
+    })
+    assert response.status_code == 200, response.text
+    report = response.json()
+    day = report['days'][0]
+    assert report['single_shift'] is True
+    assert len(day['events']) == 2
+    assert day['morning_entry'].endswith('07:10:00')
+    assert day['final_exit'].endswith('21:30:00')
+    assert day['additional_records'] == 1
+    assert not any(item['type'] == 'MISSING_MARK' for item in day['incidents'])
+    assert report['summary']['total_records'] == 3
+    assert _raw_snapshot(db) == before
+
+
+def test_single_shift_range_rejects_reversed_hours(client, db):
+    response = client.get(ROUTE, params={
+        'date_from': '2026-07-15', 'date_to': '2026-07-15', 'single_shift': 'true',
+        'morning_start': '21:00', 'morning_end': '07:00',
+        'morning_start_tolerance': 5, 'morning_end_tolerance': 5,
+    })
+    assert response.status_code == 422
+
+
 def test_document_lookup_is_idempotent_on_second_report(client, db):
     _seed_marks(db)
     first = client.get(ROUTE, params={'date_from': '2026-07-15', 'date_to': '2026-07-15'})

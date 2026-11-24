@@ -1,5 +1,5 @@
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -51,6 +51,44 @@ def texts(day):
     return " | ".join(incident.description for incident in day.incidents)
 
 
+def continuous_plan(day=DAY, start="07:00:00", end="21:00:00"):
+    return DaySchedule(day=day, shift_id="temporary-single", name="Jornada continua", events=(
+        ExpectedEvent(kind=EventKind.MORNING_ENTRY, expected_at=stamp(start, day),
+                      window_start=stamp("03:00:00", day), window_end=stamp("11:00:00", day)),
+        ExpectedEvent(kind=EventKind.FINAL_EXIT, expected_at=stamp(end, day),
+                      window_start=stamp("17:00:00", day), window_end=stamp("23:59:59", day)),
+    ))
+
+
+def test_jornada_continua_con_dos_marcaciones_y_adicional_intermedia():
+    schedule = continuous_plan()
+    day = evaluate_day(EMPLOYEE, DAY, schedule, params(), marks("07:10:00", "13:00:00", "21:30:00"), True)
+    assert [event.kind for event in schedule.events] == [EventKind.MORNING_ENTRY, EventKind.FINAL_EXIT]
+    assert day.morning_entry == stamp("07:10:00")
+    assert day.final_exit == stamp("21:30:00")
+    assert day.morning_exit is None and day.afternoon_entry is None
+    assert day.additional_records == 1
+    assert not any(incident.type is IncidentType.MISSING_MARK for incident in day.incidents)
+    assert day.overtime_minutes == 30
+
+
+def test_jornada_continua_incompleta_en_curso_no_crea_falta_de_salida():
+    day = evaluate_day(EMPLOYEE, DAY, continuous_plan(), params(), marks("07:10:00"), True,
+                       now=datetime.combine(DAY, time(15)))
+    assert day.status is DayStatus.IN_PROGRESS
+    assert day.morning_entry == stamp("07:10:00")
+    assert day.final_exit is None
+    assert not any(incident.type is IncidentType.MISSING_MARK for incident in day.incidents)
+
+
+def test_incidencia_de_menos_de_un_minuto_no_genera_observacion():
+    day = evaluate_day(EMPLOYEE, DAY, plan(), params(),
+                       marks("08:05:30", "12:00:00", "14:00:00", "18:00:00"), True)
+    assert day.late_seconds == 30 and day.late_minutes == 0
+    assert not any(incident.type is IncidentType.LATE for incident in day.incidents)
+    assert day.status is DayStatus.NORMAL
+
+
 # --------------------------------------------------------------------------
 # 1. Jornada normal con cuatro marcas
 # --------------------------------------------------------------------------
@@ -80,7 +118,7 @@ def test_atraso_contra_hora_de_entrada_y_tolerancia(entry, late_minutes):
     assert isinstance(day.late_minutes, int)
     if late_minutes:
         assert day.status == DayStatus.OBSERVATION
-        assert f"Atraso de {late_minutes} min" in texts(day)
+        assert f"Llegada posterior al horario establecido: {late_minutes} min" in texts(day)
     else:
         assert day.status == DayStatus.NORMAL
 
@@ -88,7 +126,7 @@ def test_atraso_contra_hora_de_entrada_y_tolerancia(entry, late_minutes):
 def test_el_atraso_no_devuelve_minutos_fractionales():
     day = evaluate(["08:06:30", "12:05:00", "13:55:00", "18:10:00"])
     assert day.late_minutes == 1
-    assert day.late_seconds == 60
+    assert day.late_seconds == 90
     assert isinstance(day.late_minutes, int)
 
 
@@ -101,7 +139,7 @@ def test_salida_anticipada():
     # 30 minutos antes de las 18:00; 5 minutos de tolerancia perdonados.
     assert day.gross_early_exit_minutes == 30
     assert day.early_exit_minutes == 25
-    assert "Salida anticipada de 25 min" in texts(day)
+    assert "Salida anticipada: 25 min" in texts(day)
     assert day.status == DayStatus.OBSERVATION
 
 
@@ -144,7 +182,7 @@ def test_salida_intermedia_y_retorno():
     assert day.afternoon_entry == stamp("15:00:00")
     assert day.final_exit == stamp("18:00:00")
     assert day.status == DayStatus.OBSERVATION
-    assert "Ausencia durante jornada: 240 min" in texts(day)
+    assert "Posible ausencia durante la jornada" not in texts(day)
 
 
 # --------------------------------------------------------------------------
@@ -153,8 +191,8 @@ def test_salida_intermedia_y_retorno():
 def test_ausencia_atraviesa_el_aluerzo_no_cuenta():
     day = evaluate(["08:00:00", "09:00:00", "15:00:00", "18:00:00"])
     # 09:00-12:00 = 180 min y 14:00-15:00 = 60 min. El descanso 12:00-14:00 no cuenta.
-    assert day.absence_minutes == 240
-    assert "Ausencia durante jornada: 240 min" in texts(day)
+    assert day.absence_minutes == 0
+    assert "Posible ausencia durante la jornada" not in texts(day)
 
 
 def test_ausencia_nula_cuando_la_jornada_esta_cubierta():
@@ -279,9 +317,9 @@ def test_suma_correcta_de_totales_del_periodo():
     summary = period_summary(days)
     assert summary.total_records == 8
     assert summary.days_evaluated == 2
-    assert summary.total_late_minutes == 6
-    assert summary.total_early_exit_minutes == 5
-    assert summary.total_absence_minutes == 240
+    assert summary.total_late_minutes == 56
+    assert summary.total_early_exit_minutes == 25
+    assert summary.total_absence_minutes == 0
     assert summary.total_overtime_minutes == 67
     assert isinstance(summary.total_late_minutes, int)
     assert summary.totals_complete
@@ -352,7 +390,7 @@ def test_los_parametros_cambian_el_atraso_sin_tocar_las_marcas():
     times = ["08:10:00", "12:05:00", "14:10:00", "18:10:00"]
     assert evaluate(times).late_minutes == 5
     assert evaluate(times, params(morning_entry_tolerance=600, afternoon_entry_tolerance=600)).late_minutes == 0
-    assert evaluate(times, params(morning_entry_tolerance=0, afternoon_entry_tolerance=0)).late_minutes == 20
+    assert evaluate(times, params(morning_entry_tolerance=0, afternoon_entry_tolerance=0)).late_minutes == 10
 
 
 def test_otras_registros_o_dias_se_rechazan():

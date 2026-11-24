@@ -21,8 +21,11 @@ Reglas de la version 2 (documentadas y aplicadas de forma uniforme):
    cuenta como ausencia.
 7. Las horas extra son informativas: tiempo registrado despues de la hora
    final esperada. No implican autorizacion ni pago.
+8. Atrasos y salidas anticipadas se contabilizan en sus propios indicadores;
+   sus minutos de borde no se duplican en el total de ausencia.
 """
 from collections import Counter
+from itertools import combinations
 from datetime import datetime, timedelta
 
 from app.attendance.evaluation_models import (
@@ -64,12 +67,13 @@ def _event_metrics(event, mark, parameters):
     if event.kind.is_entry:
         late = _deviation_after(event.expected_at, mark.timestamp, tolerance)
         code = IncidentType.LATE_RETURN if event.kind == EventKind.AFTERNOON_ENTRY else IncidentType.LATE
-        return {"status": code.value if late else "NORMAL", "late_seconds": late,
+        return {"status": code.value if _minutes(late) > 0 else "NORMAL", "late_seconds": late,
                 "gross_early_exit_seconds": 0, "early_exit_seconds": 0,
                 "exit_tolerance_policy_pending": False}
     gross = max(0, int((event.expected_at - mark.timestamp).total_seconds()))
-    return {"status": IncidentType.EARLY_EXIT.value if gross else "NORMAL", "late_seconds": 0,
-            "gross_early_exit_seconds": gross, "early_exit_seconds": None if gross == 0 else gross,
+    early = _deviation_before(event.expected_at, mark.timestamp, tolerance)
+    return {"status": IncidentType.EARLY_EXIT.value if _minutes(early) > 0 else "NORMAL", "late_seconds": 0,
+            "gross_early_exit_seconds": gross, "early_exit_seconds": early,
             "exit_tolerance_policy_pending": False}
 
 
@@ -105,46 +109,68 @@ def _units_and_duplicates(marks, events, window):
     return units
 
 
-def select_principal_marks(units, events):
-    """Elige las marcaciones principales de forma determinista y explicable.
+def select_principal_marks(units, events, *, allow_early_final=True):
+    """Asocia las marcas a los eventos esperados con mínima desviación temporal."""
+    selected = {}
+    used = set()
+    final_event = next((event for event in events if event.kind is EventKind.FINAL_EXIT), None)
 
-    * La salida principal es la PRIMERA marca valida desde la hora final
-      esperada, aunque forme parte de un grupo de marcaciones repetidas: las
-      posteriores son marcaciones adicionales, nunca la salida.
-    * Entrada, salida y retorno son las siguientes marcas en orden cronologico.
-    * Los grupos de duplicados no se asignan como marca principal.
-
-    Devuelve (selected, additional_units).
-    """
-    expected = {event.kind: event for event in events}
-    selected: dict[EventKind, object] = {}
-    used: set[int] = set()
-
-    final_event = expected.get(EventKind.FINAL_EXIT)
     if final_event is not None:
-        for index, unit in enumerate(units):
-            for mark in unit:
-                if mark.timestamp >= final_event.expected_at:
-                    selected[EventKind.FINAL_EXIT] = mark
-                    used.add(index)
-                    break
-            if EventKind.FINAL_EXIT in selected:
-                break
+        after = [(index, mark) for index, unit in enumerate(units) for mark in unit
+                 if final_event.window_start <= mark.timestamp <= final_event.window_end
+                 and mark.timestamp >= final_event.expected_at]
+        chosen = min(after, key=lambda item: (item[1].timestamp, item[0])) if after else None
+        if chosen is None and allow_early_final:
+            previous_expected = events[-2].expected_at
+            early = [(index, mark) for index, unit in enumerate(units) for mark in unit
+                     if previous_expected < mark.timestamp < final_event.expected_at
+                     and final_event.window_start <= mark.timestamp <= final_event.window_end]
+            chosen = min(early, key=lambda item: (abs((item[1].timestamp-final_event.expected_at).total_seconds()),
+                                                   -item[1].timestamp.timestamp())) if early else None
+        if chosen is not None:
+            selected[EventKind.FINAL_EXIT] = chosen[1]
+            used.add(chosen[0])
 
-    candidates = [index for index, unit in enumerate(units)
+    limit = selected.get(EventKind.FINAL_EXIT)
+    limit = limit.timestamp if limit is not None else (final_event.expected_at if final_event else None)
+    continuous = [event.kind for event in events] == [EventKind.MORNING_ENTRY, EventKind.FINAL_EXIT]
+    entry_event = next((event for event in events if event.kind is EventKind.MORNING_ENTRY), None)
+    candidates = [(index, unit[0]) for index, unit in enumerate(units)
                   if index not in used and len(unit) == 1
-                  and (final_event is None or unit[0].timestamp < final_event.expected_at)]
-    present = [event.kind for event in events if event.kind is not EventKind.FINAL_EXIT]
-    for position, kind in enumerate(present):
-        if position >= len(candidates):
+                  and (limit is None or unit[0].timestamp < limit)
+                  and (not continuous or entry_event is None or
+                       entry_event.window_start <= unit[0].timestamp <= entry_event.window_end)]
+    pending_events = [event for event in events if event.kind is not EventKind.FINAL_EXIT]
+    best = None
+    for count in range(min(len(candidates), len(pending_events)), 0, -1):
+        options = []
+        for event_indexes in combinations(range(len(pending_events)), count):
+            for candidate_indexes in combinations(range(len(candidates)), count):
+                distance = sum(abs((candidates[candidate_index][1].timestamp -
+                                    pending_events[event_index].expected_at).total_seconds())
+                               for event_index, candidate_index in zip(event_indexes, candidate_indexes))
+                options.append(((distance, event_indexes, candidate_indexes), event_indexes, candidate_indexes))
+        if options:
+            _, event_indexes, candidate_indexes = min(options, key=lambda item: item[0])
+            best = (event_indexes, candidate_indexes)
             break
-        index = candidates[position]
-        selected[kind] = units[index][0]
-        used.add(index)
+    if best is not None:
+        event_indexes, candidate_indexes = best
+        for event_index, candidate_index in zip(event_indexes, candidate_indexes):
+            unit_index, mark = candidates[candidate_index]
+            selected[pending_events[event_index].kind] = mark
+            used.add(unit_index)
 
-    additional = [unit for index, unit in enumerate(units) if index not in used]
+    additional = []
+    for index, unit in enumerate(units):
+        if index not in used:
+            additional.append(unit)
+            continue
+        chosen_mark = next((mark for mark in selected.values()
+                            if any(item.record_id == mark.record_id for item in unit)), None)
+        if chosen_mark is not None:
+            additional.extend([[mark] for mark in unit if mark.record_id != chosen_mark.record_id])
     return selected, additional
-
 
 def _expected_work_intervals(events):
     """Bloques de jornada esperada: (inicio, fin) de cada par de eventos."""
@@ -173,21 +199,14 @@ def _presence_edge(mark, event, parameters):
 
 
 def _presence_intervals(selected, events, parameters):
-    """Intervalos de presencia declarados por las marcaciones principales."""
-    expected = {event.kind: event for event in events}
+    """Intervalos de presencia para cada par entrada/salida del horario."""
     intervals = []
-    entry = selected.get(EventKind.MORNING_ENTRY)
-    exit_ = selected.get(EventKind.MORNING_EXIT)
-    back = selected.get(EventKind.AFTERNOON_ENTRY)
-    final = selected.get(EventKind.FINAL_EXIT)
-    if entry is not None and exit_ is not None:
-        start = _presence_edge(entry, expected[EventKind.MORNING_ENTRY], parameters)
-        end = _presence_edge(exit_, expected[EventKind.MORNING_EXIT], parameters)
-        intervals.append((start, end))
-    if back is not None and final is not None:
-        start = _presence_edge(back, expected[EventKind.AFTERNOON_ENTRY], parameters)
-        end = _presence_edge(final, expected[EventKind.FINAL_EXIT], parameters)
-        intervals.append((start, end))
+    for start_event, end_event in zip(events[::2], events[1::2]):
+        start_mark = selected.get(start_event.kind)
+        end_mark = selected.get(end_event.kind)
+        if start_mark is not None and end_mark is not None:
+            intervals.append((_presence_edge(start_mark, start_event, parameters),
+                              _presence_edge(end_mark, end_event, parameters)))
     return intervals
 
 
@@ -241,16 +260,20 @@ def evaluate_day(employee_id, day, schedule, parameters, records, coverage=None,
     incidents: list[Incident] = []
     suggestions: list[Suggestion] = []
 
-    selected, additional = select_principal_marks(units, events)
     final_event = expected.get(EventKind.FINAL_EXIT)
-    final_mark = selected.get(EventKind.FINAL_EXIT)
-    # La jornada sigue abierta si la hora local todavia no llega a la salida esperada.
+    # La jornada sigue abierta si la hora local todavía no llega a la salida esperada.
     in_progress = bool(now is not None and final_event is not None and now < final_event.expected_at)
+    selected, additional = select_principal_marks(units, events, allow_early_final=not in_progress)
+    final_mark = selected.get(EventKind.FINAL_EXIT)
 
     for unit in units:
         if len(unit) > 1:
-            if final_mark is not None and any(mark.record_id == final_mark.record_id for mark in unit):
-                # Varias marcaciones en la salida: la primera es la principal.
+            is_exit_cluster = (final_mark is not None and final_event is not None
+                and any(mark.record_id == final_mark.record_id for mark in unit)
+                and all(mark.timestamp >= final_event.expected_at
+                        and (mark.timestamp-final_event.expected_at).total_seconds() <= parameters.duplicate_window
+                        for mark in unit))
+            if is_exit_cluster:
                 incidents.append(_incident(IncidentType.MULTIPLE_MARKS, Severity.INFO,
                     "Múltiples marcaciones registradas en salida.", unit))
                 continue
@@ -313,13 +336,15 @@ def evaluate_day(employee_id, day, schedule, parameters, records, coverage=None,
             continue
         if event.kind is EventKind.AFTERNOON_ENTRY:
             # El retraso del retorno se informa aparte: no suma al atraso de entrada.
-            incidents.append(_incident(IncidentType.LATE_RETURN, Severity.OBSERVATION,
-                f"Retorno posterior a la tolerancia: {_minutes(deviation)} min.",
-                (mark,), deviation, event.kind))
+            if _minutes(deviation) > 0:
+                incidents.append(_incident(IncidentType.LATE_RETURN, Severity.OBSERVATION,
+                    f"Retorno posterior a la tolerancia: {_minutes(deviation)} min.",
+                    (mark,), deviation, event.kind))
             continue
         late_seconds += deviation
-        incidents.append(_incident(IncidentType.LATE, Severity.OBSERVATION,
-            f"Atraso de {_minutes(deviation)} min.", (mark,), deviation, event.kind))
+        if _minutes(deviation) > 0:
+            incidents.append(_incident(IncidentType.LATE, Severity.OBSERVATION,
+                f"Llegada posterior al horario establecido: {_minutes(deviation)} min.", (mark,), deviation, event.kind))
 
     early_seconds = None
     gross_early_seconds = None
@@ -328,9 +353,9 @@ def evaluate_day(employee_id, day, schedule, parameters, records, coverage=None,
         tolerance = parameters.tolerance(EventKind.FINAL_EXIT)
         gross_early_seconds = max(0, int((final_event.expected_at - final_mark.timestamp).total_seconds()))
         early_seconds = _deviation_before(final_event.expected_at, final_mark.timestamp, tolerance)
-        if early_seconds:
+        if _minutes(early_seconds) > 0:
             incidents.append(_incident(IncidentType.EARLY_EXIT, Severity.OBSERVATION,
-                f"Salida anticipada de {_minutes(early_seconds)} min.", (final_mark,), early_seconds,
+                f"Salida anticipada: {_minutes(early_seconds)} min.", (final_mark,), early_seconds,
                 EventKind.FINAL_EXIT))
 
     overtime_seconds = None
@@ -342,9 +367,21 @@ def evaluate_day(employee_id, day, schedule, parameters, records, coverage=None,
     absence_seconds = None
     if presence_intervals and len(presence_intervals) == len(expected_intervals):
         absence_seconds = _absence_seconds(expected_intervals, presence_intervals)
-        if absence_seconds:
+        # La falta de cobertura en los límites se contabiliza como atraso o salida anticipada.
+        boundary_seconds = 0
+        for event in events:
+            mark = selected.get(event.kind)
+            if mark is None:
+                continue
+            delta = int((mark.timestamp-event.expected_at).total_seconds())
+            if event.kind.is_entry and delta > parameters.tolerance(event.kind):
+                boundary_seconds += delta
+            elif not event.kind.is_entry and delta < -parameters.tolerance(event.kind):
+                boundary_seconds -= delta
+        absence_seconds = max(0, absence_seconds-boundary_seconds)
+        if _minutes(absence_seconds) > 0:
             incidents.append(_incident(IncidentType.ABSENCE, Severity.OBSERVATION,
-                f"Ausencia durante jornada: {_minutes(absence_seconds)} min.", (), absence_seconds))
+                f"Posible ausencia durante la jornada: {_minutes(absence_seconds)} min.", (), absence_seconds))
 
     severity = {incident.severity for incident in incidents}
     if in_progress:
